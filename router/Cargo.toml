@@ -1,0 +1,23 @@
+[package]
+name = "router"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "router"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+panic-halt = "1"
+cortex-m-rt = "0.7"
+cortex-m = "0.7"
+cortex-m-semihosting = "0.5.0"
+stm32f4xx-hal = { version = "0.22.1", features = ["stm32f407"] }
+macros = { path = "../macros" }
+embedded-hal-bus = "0.3.0"
+embedded-hal = "1.0.0"
+thiserror = { version = "2", default-features = false }
+heapless = "0.8.0"
