@@ -258,6 +258,9 @@ impl<const N: usize, const M: usize> Enc28j60<N, M> {
 
     pub fn handle_transaction(
         &mut self,
+        // TODO: feeding operations like this is awful as we need to match over the transactions
+        // what we ideally would want is to keep some struct with all the details of the original operations with references to buffers
+        // this function here shows also how we could actually update buffers here and never copy operations around.
         mut transaction: heapless::Deque<ControlRegisterOperation, N>,
     ) {
         match transaction.pop_front() {
@@ -265,8 +268,8 @@ impl<const N: usize, const M: usize> Enc28j60<N, M> {
                 if b.contains(&(OpCode::RCR as u8 | Self::ESTAT as u8)) {
                     let Some(ControlRegisterOperation::Read(operation)) = transaction.pop_front()
                     else {
-                        // ERROR!
-                        return;
+                        // TODO: with a good operation wrapper we wouldn't need to panic here.
+                        panic!("Inconsistent transaction: reading ESTAT without a read buffer");
                     };
 
                     if operation[0] & 0b0000_0001 == 1 {
