@@ -234,12 +234,25 @@ impl<const N: usize, const M: usize> Enc28j60<N, M> {
         Ok(())
     }
 
+    fn bit_field_set_to_control_register_address(
+        &mut self,
+        address: RegisterAddress,
+        value: u8,
+    ) -> Result<(), TransactionError> {
+        self.pending_transactions.new_transaction()?;
+        self.pending_transactions
+            .push_operation(ControlRegisterOperation::Write(heapless::Vec::from_iter(
+                [OpCode::BFS as u8 | address as u8, value].into_iter(),
+            )))?;
+        Ok(())
+    }
+
     fn set_bank(&mut self, bank: Bank) -> Result<(), TransactionError> {
         if bank == self.current_bank {
             return Ok(());
         }
 
-        self.write_to_control_register_address(Self::ECON, bank as u8)?;
+        self.bit_field_set_to_control_register_address(Self::ECON, bank as u8)?;
 
         self.current_bank = bank;
         Ok(())

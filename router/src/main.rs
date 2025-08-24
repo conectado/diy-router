@@ -1,7 +1,7 @@
 #![no_main]
 #![no_std]
 
-use cortex_m_semihosting::hprintln;
+use cortex_m_semihosting::{hprint, hprintln};
 use embedded_hal_bus::spi::ExclusiveDevice;
 
 #[cfg(not(debug_assertions))]
@@ -61,6 +61,30 @@ fn main() -> ! {
                 .unwrap();
         }
 
+        hprint!("{:?}", transaction);
+        enc28j60.handle_transaction(transaction);
+    }
+
+    enc28j60
+        .read_register(enc28j60::ControlRegister {
+            bank: enc28j60::Bank::Bank3,
+            address: enc28j60::RegisterAddress::r12,
+        })
+        .unwrap();
+
+    while let Some(mut transaction) = enc28j60.poll_pending_transaction() {
+        {
+            let mut spi_transaction = heapless::Vec::<_, 3>::from_iter(
+                transaction
+                    .iter_mut()
+                    .map(embedded_hal::spi::Operation::from),
+            );
+            spi_device
+                .transaction(spi_transaction.as_mut_slice())
+                .unwrap();
+        }
+
+        hprint!("{:?}", transaction);
         enc28j60.handle_transaction(transaction);
     }
 
