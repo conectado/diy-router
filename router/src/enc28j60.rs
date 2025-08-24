@@ -1,10 +1,13 @@
+use core::ops::RangeInclusive;
+
 use macros::make_enum;
 use thiserror::Error;
 
-#[derive(Default)]
 pub struct Enc28j60<const N: usize = 50, const M: usize = 10> {
     current_bank: Bank,
     pending_transactions: Transactions<N, M>,
+    erx_range: RangeInclusive<ux::u9>,
+    ready: bool,
 }
 
 //// One of 4 memory banks for control registers.
@@ -30,6 +33,15 @@ make_enum!(pub RegisterAddress, 5);
 pub struct ControlRegister {
     pub bank: Bank,
     pub address: RegisterAddress,
+}
+
+impl ControlRegister {
+    fn next(&self) -> ControlRegister {
+        ControlRegister {
+            address: self.address.next(),
+            ..*self
+        }
+    }
 }
 
 /// Operation Code for interfacing with ENC28j60.
@@ -105,30 +117,183 @@ impl<'a, const N: usize, const M: usize> Transactions<N, M> {
 
 impl<const N: usize, const M: usize> Enc28j60<N, M> {
     const ECON: RegisterAddress = RegisterAddress::r1F;
+    const ESTAT: RegisterAddress = RegisterAddress::r1D;
 
-    pub fn new() -> Self {
-        Default::default()
+    // TODO: better represent that these are words
+    const ERXSTL: ControlRegister = ControlRegister {
+        bank: Bank::Bank0,
+        address: RegisterAddress::r08,
+    };
+    const ERXNDL: ControlRegister = ControlRegister {
+        bank: Bank::Bank0,
+        address: RegisterAddress::r0A,
+    };
+    const ERXDPTL: ControlRegister = ControlRegister {
+        bank: Bank::Bank0,
+        address: RegisterAddress::r0C,
+    };
+
+    const ERXFCON: ControlRegister = ControlRegister {
+        bank: Bank::Bank1,
+        address: RegisterAddress::r18,
+    };
+
+    const MACON1: ControlRegister = ControlRegister {
+        bank: Bank::Bank2,
+        address: RegisterAddress::r00,
+    };
+
+    const MACON3: ControlRegister = ControlRegister {
+        bank: Bank::Bank2,
+        address: RegisterAddress::r02,
+    };
+    const MACON4: ControlRegister = ControlRegister {
+        bank: Bank::Bank2,
+        address: RegisterAddress::r03,
+    };
+
+    pub fn with_erx_range(erx_range: RangeInclusive<ux::u9>) -> Self {
+        Self {
+            current_bank: Default::default(),
+            pending_transactions: Default::default(),
+            erx_range,
+            ready: false,
+        }
+    }
+
+    pub fn with_erx_length(length: ux::u9) -> Self {
+        Self {
+            current_bank: Default::default(),
+            pending_transactions: Default::default(),
+            erx_range: (ux::u9::min_value())..=length,
+            ready: false,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), TransactionError> {
+        let start = (*self.erx_range.start()).into();
+        let end = (*self.erx_range.end()).into();
+
+        // Initialize receive buffer
+        // NOTE: Waiting for osc is baked in poll_pending.
+        // it could be done after ETH config, which would be ideal
+        // but it's kept there for simplicity right now.
+        self.write_word(Self::ERXSTL, start)?;
+        self.write_word(Self::ERXNDL, end)?;
+        self.write_word(Self::ERXDPTL, start)?;
+
+        // Initialize Receieve filters
+        // TODO: for now we go promiscuous 😏
+        self.write_register(Self::ERXFCON, 0x00)?;
+
+        // Initialize MAC
+        // TODO: expose config
+        self.write_register(Self::MACON1, 0b0000_1101)?;
+        self.write_word(Self::MACON3, 0b111_1_0_1_1_1)?;
+        self.write_word(Self::MACON4, 0b0_0_0_0_0_0)?;
+
+        // TODO: Phy initialize?
+
+        Ok(())
     }
 
     pub fn poll_pending_transaction(
         &mut self,
     ) -> Option<heapless::Deque<ControlRegisterOperation, N>> {
+        if !self.ready {
+            let mut result = heapless::Deque::new();
+
+            let mut read_buffer = heapless::Vec::new();
+            read_buffer.push(0).unwrap();
+
+            result
+                .push_back(ControlRegisterOperation::Write(heapless::Vec::from_iter(
+                    [OpCode::RCR as u8 | Self::ESTAT as u8].into_iter(),
+                )))
+                .unwrap();
+            result
+                .push_back(ControlRegisterOperation::Read(read_buffer))
+                .unwrap();
+
+            return Some(result);
+        }
+
         self.pending_transactions.pop_transaction()
+    }
+
+    fn write_to_control_register_address(
+        &mut self,
+        address: RegisterAddress,
+        value: u8,
+    ) -> Result<(), TransactionError> {
+        self.pending_transactions.new_transaction()?;
+        self.pending_transactions
+            .push_operation(ControlRegisterOperation::Write(heapless::Vec::from_iter(
+                [OpCode::WCR as u8 | address as u8, value].into_iter(),
+            )))?;
+        Ok(())
+    }
+
+    fn set_bank(&mut self, bank: Bank) -> Result<(), TransactionError> {
+        if bank == self.current_bank {
+            return Ok(());
+        }
+
+        self.write_to_control_register_address(Self::ECON, bank as u8)?;
+
+        self.current_bank = bank;
+        Ok(())
+    }
+
+    fn write_word(
+        &mut self,
+        register: ControlRegister,
+        value: u16,
+    ) -> Result<(), TransactionError> {
+        let [low, high] = value.to_be_bytes();
+        self.write_register(register, low)?;
+        self.write_register(register.next(), high)?;
+        Ok(())
+    }
+
+    pub fn handle_transaction(
+        &mut self,
+        mut transaction: heapless::Deque<ControlRegisterOperation, N>,
+    ) {
+        match transaction.pop_front() {
+            Some(ControlRegisterOperation::Write(b)) => {
+                if b.contains(&(OpCode::RCR as u8 | Self::ESTAT as u8)) {
+                    let Some(ControlRegisterOperation::Read(operation)) = transaction.pop_front()
+                    else {
+                        // ERROR!
+                        return;
+                    };
+
+                    if operation[0] & 0b0000_0001 == 1 {
+                        self.ready = true;
+                    }
+                }
+            }
+            Some(_) => {}
+            None => {
+                return;
+            }
+        }
+    }
+
+    fn write_register(
+        &mut self,
+        register: ControlRegister,
+        value: u8,
+    ) -> Result<(), TransactionError> {
+        self.set_bank(register.bank)?;
+        self.write_to_control_register_address(register.address, value)
     }
 
     // TODO: internally buffer operations?
     /// Requires at least 2 positions for operations.
     pub fn read_register(&mut self, register: ControlRegister) -> Result<(), TransactionError> {
-        if register.bank != self.current_bank {
-            self.pending_transactions.new_transaction()?;
-            // TODO: Bit flags? bit set?
-            self.pending_transactions
-                .push_operation(ControlRegisterOperation::Write(heapless::Vec::from_iter(
-                    [OpCode::WCR as u8 | Self::ECON as u8, register.bank as u8].into_iter(),
-                )))?;
-
-            self.current_bank = register.bank;
-        }
+        self.set_bank(register.bank)?;
 
         self.pending_transactions.new_transaction()?;
         self.pending_transactions

@@ -3,14 +3,16 @@
 
 use cortex_m_semihosting::hprintln;
 use embedded_hal_bus::spi::ExclusiveDevice;
+
+#[cfg(not(debug_assertions))]
 use panic_halt as _;
+
+#[cfg(debug_assertions)]
+use panic_semihosting as _;
 
 use stm32f4xx_hal::{self as hal, hal::spi::SpiDevice};
 
-use crate::{
-    enc28j60::{Bank, ControlRegister, RegisterAddress},
-    hal::{pac, prelude::*, spi},
-};
+use crate::hal::{pac, prelude::*, spi};
 use cortex_m_rt::entry;
 
 mod enc28j60;
@@ -30,7 +32,7 @@ fn main() -> ! {
     let spi_mosi = gpioa.pa7;
     let mut rcc = p.RCC.constrain().cfgr.freeze();
 
-    let mut enc28j60 = Enc28j60::<50, 10>::new();
+    let mut enc28j60 = Enc28j60::<50, 50>::with_erx_length((0x1f0u16).try_into().unwrap());
 
     let spi = spi::Spi::new(
         p.SPI1,
@@ -44,22 +46,22 @@ fn main() -> ! {
     );
 
     let mut spi_device = ExclusiveDevice::new_no_delay(spi, spi_nss).unwrap();
-    const EREVID: ControlRegister = ControlRegister {
-        bank: Bank::Bank3,
-        address: RegisterAddress::r12,
-    };
 
-    enc28j60.read_register(EREVID).unwrap();
+    enc28j60.init().unwrap();
 
     while let Some(mut transaction) = enc28j60.poll_pending_transaction() {
-        let mut transaction = heapless::Vec::<_, 3>::from_iter(
-            transaction
-                .iter_mut()
-                .map(embedded_hal::spi::Operation::from),
-        );
-        spi_device.transaction(transaction.as_mut_slice()).unwrap();
+        {
+            let mut spi_transaction = heapless::Vec::<_, 3>::from_iter(
+                transaction
+                    .iter_mut()
+                    .map(embedded_hal::spi::Operation::from),
+            );
+            spi_device
+                .transaction(spi_transaction.as_mut_slice())
+                .unwrap();
+        }
 
-        hprintln!("{:?}", transaction);
+        enc28j60.handle_transaction(transaction);
     }
 
     loop {}

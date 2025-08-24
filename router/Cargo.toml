@@ -21,3 +21,5 @@ embedded-hal-bus = "0.3.0"
 embedded-hal = "1.0.0"
 thiserror = { version = "2", default-features = false }
 heapless = "0.8.0"
+ux = "0.1"
+panic-semihosting = { version = "0.6", features = ["exit"] }

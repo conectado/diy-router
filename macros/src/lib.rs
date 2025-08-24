@@ -53,11 +53,25 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
         quote!( #ident = #val, )
     });
 
+    let next_arms = (0..=max_value).map(|i| {
+        let cur_ident = format_ident!("r{:02X}", i);
+        let next_ident = format_ident!("r{:02X}", if i == max_value { 0 } else { i + 1 });
+        quote!( Self::#cur_ident => Self::#next_ident, )
+    });
+
     let expanded = quote! {
         #[repr(#repr_ty)]
         #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
         #vis enum #name {
             #(#variants)*
+        }
+
+        impl #name {
+            pub fn next(&self) -> Self {
+                match self {
+                    #(#next_arms)*
+                }
+            }
         }
     };
 
